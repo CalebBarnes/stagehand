@@ -500,6 +500,42 @@ describe("POST /v1/sessions/start - V3 format", () => {
   const headers = getHeaders("3.0.0");
   const localBrowser = LOCAL_BROWSER_BODY;
 
+  it("should start session without x-model-api-key header", async () => {
+    const url = getBaseUrl();
+
+    // Build headers without x-model-api-key to verify the server accepts
+    // sessions when the client omits the model key (optional modelApiKey).
+    const headersWithoutModelKey = Object.fromEntries(
+      Object.entries(headers).filter(([k]) => k !== "x-model-api-key"),
+    );
+
+    const ctx = await fetchWithContext<StartResponse>(
+      `${url}/v1/sessions/start`,
+      {
+        method: "POST",
+        headers: headersWithoutModelKey,
+        body: JSON.stringify({ modelName: "gpt-4.1-nano", ...localBrowser }),
+      },
+    );
+
+    assertFetchStatus(
+      ctx,
+      HTTP_OK,
+      "Session start without x-model-api-key should succeed",
+    );
+    assertFetchOk(ctx.body !== null, "Should have response body", ctx);
+    assertFetchOk(
+      isSuccessResponse(ctx.body),
+      "Should be a success response",
+      ctx,
+    );
+    assertFetchOk(ctx.body.data.available, "Session should be available", ctx);
+    assertFetchOk(!!ctx.body.data.sessionId, "Should have sessionId", ctx);
+    assertFetchOk(!!ctx.body.data.cdpUrl, "Should have cdpUrl", ctx);
+
+    await endSession(ctx.body.data.sessionId, headersWithoutModelKey);
+  });
+
   it("should start session with modelName string and V3 header", async () => {
     const url = getBaseUrl();
 
@@ -673,6 +709,49 @@ describe("POST /v1/sessions/start - V3 format", () => {
     );
 
     await endSession(ctx.body.data.sessionId, headers);
+  });
+
+  it("should reject cdpUrl without browser.type set to 'local'", async () => {
+    const url = getBaseUrl();
+
+    const ctx = await fetchWithContext<StartErrorResponse>(
+      `${url}/v1/sessions/start`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          modelName: "gpt-4.1-nano",
+          browser: { cdpUrl: "ws://localhost:9222/devtools/browser/test" },
+        }),
+      },
+    );
+
+    assertFetchStatus(ctx, HTTP_BAD_REQUEST, "Request should fail with 400");
+    assertFetchOk(ctx.body !== null, "Should have response body", ctx);
+    assertFetchOk(!ctx.body.success, "Should be an error response", ctx);
+  });
+
+  it("should reject cdpUrl with browser.type explicitly set to 'browserbase'", async () => {
+    const url = getBaseUrl();
+
+    const ctx = await fetchWithContext<StartErrorResponse>(
+      `${url}/v1/sessions/start`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          modelName: "gpt-4.1-nano",
+          browser: {
+            type: "browserbase",
+            cdpUrl: "ws://localhost:9222/devtools/browser/test",
+          },
+        }),
+      },
+    );
+
+    assertFetchStatus(ctx, HTTP_BAD_REQUEST, "Request should fail with 400");
+    assertFetchOk(ctx.body !== null, "Should have response body", ctx);
+    assertFetchOk(!ctx.body.success, "Should be an error response", ctx);
   });
 
   it("should return error for browserbase requests without API key", async () => {

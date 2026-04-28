@@ -17,16 +17,17 @@ import * as net from "net";
 import { spawn } from "child_process";
 import * as readline from "readline";
 import type { Protocol } from "devtools-protocol";
+import WebSocket from "ws";
 import { version as VERSION } from "../package.json";
 import {
   DEFAULT_LOCAL_CONFIG,
   getLocalModeHint,
   type LocalBrowserLaunchOptions,
-  type LocalCdpDiscovery,
   type LocalConfig,
   type LocalInfo,
   resolveLocalStrategy,
 } from "./local-strategy";
+import { discoverLocalCdp } from "./local-cdp-discovery";
 import { resolveWsTarget } from "./resolve-ws";
 import { NodeHtmlMarkdown } from "node-html-markdown";
 
@@ -279,238 +280,6 @@ async function getDesiredMode(session: string): Promise<BrowseMode> {
     if (override === "browserbase" || override === "local") return override;
   } catch {}
   return hasBrowserbaseCredentials() ? "browserbase" : "local";
-}
-
-// ==================== CDP AUTO-DISCOVERY ====================
-
-/**
- * Well-known Chrome user-data directories per platform.
- * Each may contain a DevToolsActivePort file when Chrome is running with
- * remote debugging enabled.
- */
-function getChromeUserDataDirs(): string[] {
-  const home = os.homedir();
-  const dirs: string[] = [];
-
-  if (process.platform === "darwin") {
-    const base = path.join(home, "Library", "Application Support");
-    for (const name of [
-      "Google/Chrome",
-      "Google/Chrome Canary",
-      "Chromium",
-      "BraveSoftware/Brave-Browser",
-    ]) {
-      dirs.push(path.join(base, name));
-    }
-  } else if (process.platform === "linux") {
-    const config = path.join(home, ".config");
-    for (const name of [
-      "google-chrome",
-      "google-chrome-unstable",
-      "chromium",
-      "BraveSoftware/Brave-Browser",
-    ]) {
-      dirs.push(path.join(config, name));
-    }
-  }
-
-  return dirs;
-}
-
-/**
- * Read DevToolsActivePort file from a Chrome user-data directory.
- * Returns { port, wsPath } or null if file doesn't exist or is malformed.
- */
-async function readDevToolsActivePort(
-  userDataDir: string,
-): Promise<{ port: number; wsPath: string } | null> {
-  try {
-    const content = await fs.readFile(
-      path.join(userDataDir, "DevToolsActivePort"),
-      "utf-8",
-    );
-    const lines = content.trim().split("\n");
-    const port = parseInt(lines[0]?.trim(), 10);
-    if (isNaN(port) || port <= 0 || port > 65535) return null;
-    const wsPath = lines[1]?.trim() || "/devtools/browser";
-    return { port, wsPath };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Check if a TCP port is reachable on localhost with a short timeout.
- */
-function isPortReachable(port: number, timeoutMs = 500): Promise<boolean> {
-  return new Promise((resolve) => {
-    const sock = net.createConnection({ host: "127.0.0.1", port });
-    const timer = setTimeout(() => {
-      sock.destroy();
-      resolve(false);
-    }, timeoutMs);
-    sock.on("connect", () => {
-      clearTimeout(timer);
-      sock.destroy();
-      resolve(true);
-    });
-    sock.on("error", () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-  });
-}
-
-/**
- * Probe a CDP endpoint at the given port.
- * Tries /json/version first, then falls back to a direct WebSocket handshake
- * (needed for Chrome 136+ with UI-based remote debugging).
- * Returns the webSocketDebuggerUrl on success, or null.
- */
-async function probeCdpEndpoint(port: number): Promise<string | null> {
-  // Try /json/version (standard path)
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`http://127.0.0.1:${port}/json/version`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (res.ok) {
-      const json = (await res.json()) as { webSocketDebuggerUrl?: string };
-      if (json.webSocketDebuggerUrl) {
-        return json.webSocketDebuggerUrl;
-      }
-    }
-  } catch {
-    // /json/version unavailable
-  }
-
-  // Fallback: direct WebSocket at /devtools/browser
-  // Chrome 136+ with chrome://inspect may only expose WS, not HTTP endpoints
-  const wsUrl = `ws://127.0.0.1:${port}/devtools/browser`;
-  try {
-    const verified = await verifyCdpWebSocket(wsUrl);
-    if (verified) return wsUrl;
-  } catch {
-    // WS fallback also failed
-  }
-
-  return null;
-}
-
-/**
- * Verify a WebSocket URL is a valid CDP endpoint by attempting an HTTP upgrade.
- * Sends a minimal WebSocket handshake and checks for a 101 Switching Protocols response.
- */
-function verifyCdpWebSocket(wsUrl: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const url = new URL(wsUrl);
-    const port = parseInt(url.port) || 80;
-    const wsKey = Buffer.from(
-      Array.from({ length: 16 }, () => Math.floor(Math.random() * 256)),
-    ).toString("base64");
-
-    const sock = net.createConnection({ host: url.hostname, port });
-    let response = "";
-
-    const timer = setTimeout(() => {
-      sock.destroy();
-      resolve(false);
-    }, 2000);
-
-    sock.on("connect", () => {
-      // Send a WebSocket upgrade request
-      sock.write(
-        `GET ${url.pathname} HTTP/1.1\r\n` +
-          `Host: ${url.hostname}:${port}\r\n` +
-          `Upgrade: websocket\r\n` +
-          `Connection: Upgrade\r\n` +
-          `Sec-WebSocket-Key: ${wsKey}\r\n` +
-          `Sec-WebSocket-Version: 13\r\n` +
-          `\r\n`,
-      );
-    });
-
-    sock.on("data", (data) => {
-      response += data.toString();
-      // Check for successful WebSocket upgrade (101 Switching Protocols)
-      if (/^HTTP\/1\.[01] 101(?:\s|$)/.test(response)) {
-        clearTimeout(timer);
-        sock.destroy();
-        resolve(true);
-      } else if (response.includes("\r\n\r\n")) {
-        // Got a complete HTTP response that isn't 101
-        clearTimeout(timer);
-        sock.destroy();
-        resolve(false);
-      }
-    });
-
-    sock.on("error", () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-  });
-}
-
-interface CdpCandidate {
-  wsUrl: string;
-  source: string; // e.g. "DevToolsActivePort (Google Chrome)" or "port 9222"
-}
-
-/**
- * Discover locally-running Chrome instances with CDP debugging enabled.
- * Returns the discovered CDP WebSocket URL, or null with a reason.
- *
- * Discovery order:
- * 1. DevToolsActivePort files in well-known Chrome user-data dirs
- * 2. Common debugging ports (9222, 9229)
- *
- * If multiple healthy candidates are found, returns null (ambiguity).
- */
-async function discoverLocalCdp(): Promise<LocalCdpDiscovery | null> {
-  const candidates: CdpCandidate[] = [];
-
-  // Phase 1: Scan DevToolsActivePort files
-  const userDataDirs = getChromeUserDataDirs();
-  for (const dir of userDataDirs) {
-    const info = await readDevToolsActivePort(dir);
-    if (!info) continue;
-
-    // Verify port is alive
-    if (!(await isPortReachable(info.port))) {
-      // Stale file — clean up
-      try {
-        await fs.unlink(path.join(dir, "DevToolsActivePort"));
-      } catch {}
-      continue;
-    }
-
-    const wsUrl = await probeCdpEndpoint(info.port);
-    if (wsUrl) {
-      const name = path.basename(dir);
-      candidates.push({ wsUrl, source: `DevToolsActivePort (${name})` });
-    }
-  }
-
-  // Phase 2: Probe common ports (only if DevToolsActivePort yielded nothing)
-  if (candidates.length === 0) {
-    for (const port of [9222, 9229]) {
-      if (!(await isPortReachable(port))) continue;
-      const wsUrl = await probeCdpEndpoint(port);
-      if (wsUrl) {
-        candidates.push({ wsUrl, source: `port ${port}` });
-      }
-    }
-  }
-
-  // Ambiguity check
-  if (candidates.length > 1) {
-    return null; // Caller should fall back to isolated and report ambiguity
-  }
-
-  return candidates[0] ?? null;
 }
 
 async function isDaemonRunning(session: string): Promise<boolean> {
@@ -2920,6 +2689,278 @@ networkCmd
       process.exit(1);
     }
   });
+
+// ==================== CDP TAILING ====================
+
+interface CDPMessage {
+  id?: number;
+  method?: string;
+  params?: unknown;
+  result?: unknown;
+  error?: { code: number; message: string };
+  sessionId?: string;
+}
+
+const CDP_DEFAULT_DOMAINS = ["Network", "Console", "Runtime", "Log", "Page"];
+
+program
+  .command("cdp <url|port>")
+  .description(
+    "Attach to a CDP target and stream DevTools protocol events as NDJSON.\n" +
+      "Accepts a WebSocket URL (ws://...) or a bare port number (e.g. 9222).\n" +
+      "Output is one JSON object per line, suitable for piping to files or jq.",
+  )
+  .option(
+    "--domain <domains...>",
+    `CDP domains to enable (repeatable). Default: ${CDP_DEFAULT_DOMAINS.join(",")}`,
+  )
+  .option("--pretty", "Human-readable output instead of JSON")
+  .action(
+    async (
+      target: string,
+      cmdOpts: { domain?: string[]; pretty?: boolean },
+    ) => {
+      const wsUrl = await resolveWsTarget(target);
+      const domains = cmdOpts.domain ?? CDP_DEFAULT_DOMAINS;
+      const usePretty = cmdOpts.pretty ?? process.stdout.isTTY ?? false;
+
+      let messageId = 1;
+      const pendingIds = new Set<number>();
+      const targetSessionMap = new Map<string, string>();
+
+      function sendCDP(
+        ws: WebSocket,
+        method: string,
+        params: Record<string, unknown> = {},
+        sessionId?: string,
+      ): number {
+        const id = messageId++;
+        pendingIds.add(id);
+        const msg: Record<string, unknown> = { id, method, params };
+        if (sessionId) msg.sessionId = sessionId;
+        ws.send(JSON.stringify(msg));
+        return id;
+      }
+
+      function enableDomainsForSession(ws: WebSocket, sessionId: string): void {
+        for (const domain of domains) {
+          if (domain === "Network") {
+            sendCDP(
+              ws,
+              "Network.enable",
+              { maxTotalBufferSize: 1000000, maxResourceBufferSize: 100000 },
+              sessionId,
+            );
+          } else {
+            sendCDP(ws, `${domain}.enable`, {}, sessionId);
+          }
+
+          // Page.enable does not emit Page.lifecycleEvent on its own; it requires
+          // a separate opt-in. Enable it so consumers see DOMContentLoaded, load,
+          // firstPaint, networkIdle, etc.
+          if (domain === "Page") {
+            sendCDP(
+              ws,
+              "Page.setLifecycleEventsEnabled",
+              { enabled: true },
+              sessionId,
+            );
+          }
+        }
+      }
+
+      function writeEvent(message: CDPMessage): void {
+        try {
+          process.stdout.write(JSON.stringify(message) + "\n");
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code === "EPIPE") process.exit(0);
+          throw err;
+        }
+      }
+
+      function writePrettyEvent(message: CDPMessage): void {
+        if (!message.method) return;
+        const params = message.params as Record<string, unknown> | undefined;
+        let line = `[${message.method}]`;
+
+        try {
+          switch (message.method) {
+            case "Network.requestWillBeSent": {
+              const req = params?.request as
+                | { method?: string; url?: string }
+                | undefined;
+              if (req) line += ` ${req.method ?? "?"} ${req.url ?? ""}`;
+              break;
+            }
+            case "Network.responseReceived": {
+              const resp = params?.response as
+                | { status?: number; url?: string }
+                | undefined;
+              if (resp) line += ` ${resp.status ?? "?"} ${resp.url ?? ""}`;
+              break;
+            }
+            case "Network.loadingFailed": {
+              const errorText =
+                (params?.errorText as string) ??
+                (params?.canceled ? "Canceled" : "Unknown");
+              line += ` ${errorText}`;
+              break;
+            }
+            case "Runtime.consoleAPICalled": {
+              const type = (params?.type as string) ?? "log";
+              const args =
+                (params?.args as Array<{
+                  value?: unknown;
+                  description?: string;
+                }>) ?? [];
+              const text = args
+                .map((a) => a.description ?? a.value ?? "")
+                .join(" ");
+              line += ` [${type}] ${text}`;
+              break;
+            }
+            case "Runtime.exceptionThrown": {
+              const detail = params?.exceptionDetails as
+                | {
+                    text?: string;
+                    exception?: { description?: string };
+                  }
+                | undefined;
+              line += ` ${detail?.exception?.description ?? detail?.text ?? "Unknown exception"}`;
+              break;
+            }
+            case "Page.frameNavigated": {
+              const url = (params?.frame as { url?: string })?.url ?? "";
+              if (url) line += ` ${url}`;
+              break;
+            }
+            case "Page.lifecycleEvent": {
+              const name = (params?.name as string) ?? "";
+              if (name) line += ` ${name}`;
+              break;
+            }
+            case "Target.attachedToTarget": {
+              const info = params?.targetInfo as
+                | { type?: string; url?: string }
+                | undefined;
+              if (info) line += ` [${info.type ?? "?"}] ${info.url ?? ""}`;
+              break;
+            }
+            default:
+              break;
+          }
+        } catch {
+          // Formatting failed — use method name only
+        }
+
+        try {
+          process.stdout.write(line + "\n");
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code === "EPIPE") process.exit(0);
+          throw err;
+        }
+      }
+
+      const emit = usePretty ? writePrettyEvent : writeEvent;
+
+      await new Promise<void>((resolve) => {
+        const ws = new WebSocket(wsUrl);
+        let closed = false;
+
+        function cleanup(): void {
+          if (closed) return;
+          closed = true;
+          if (
+            ws.readyState === WebSocket.OPEN ||
+            ws.readyState === WebSocket.CONNECTING
+          ) {
+            ws.close();
+          }
+          resolve();
+        }
+
+        process.on("SIGINT", cleanup);
+        process.on("SIGTERM", cleanup);
+
+        ws.on("open", () => {
+          if (usePretty) {
+            process.stderr.write(`Connected to ${wsUrl}\n`);
+          }
+
+          // Auto-attach to page targets
+          sendCDP(ws, "Target.setAutoAttach", {
+            autoAttach: true,
+            flatten: true,
+            waitForDebuggerOnStart: false,
+            filter: [{ type: "page" }],
+          });
+
+          sendCDP(ws, "Target.setDiscoverTargets", {
+            discover: true,
+            filter: [{ type: "page" }],
+          });
+        });
+
+        ws.on("message", (raw: WebSocket.RawData) => {
+          let data: CDPMessage;
+          try {
+            data = JSON.parse(raw.toString()) as CDPMessage;
+          } catch {
+            return;
+          }
+
+          // Filter out responses to our own commands
+          if (data.id !== undefined && pendingIds.has(data.id)) {
+            pendingIds.delete(data.id);
+            if (data.error) {
+              process.stderr.write(
+                `CDP error (id=${data.id}): ${data.error.message}\n`,
+              );
+            }
+            return;
+          }
+
+          // Track page targets and enable domains
+          if (data.method === "Target.attachedToTarget" && data.params) {
+            const p = data.params as {
+              sessionId: string;
+              targetInfo: { targetId: string; type: string };
+            };
+            if (p.targetInfo?.type === "page") {
+              targetSessionMap.set(p.targetInfo.targetId, p.sessionId);
+              enableDomainsForSession(ws, p.sessionId);
+            }
+          }
+
+          if (data.method === "Target.detachedFromTarget" && data.params) {
+            const p = data.params as {
+              sessionId: string;
+              targetId?: string;
+            };
+            const targetId =
+              p.targetId ??
+              [...targetSessionMap.entries()].find(
+                ([, sid]) => sid === p.sessionId,
+              )?.[0];
+            if (targetId) targetSessionMap.delete(targetId);
+          }
+
+          emit(data);
+        });
+
+        ws.on("error", (err: Error) => {
+          process.stderr.write(`Error: ${err.message}\n`);
+        });
+
+        ws.on("close", () => {
+          if (!closed && usePretty) {
+            process.stderr.write("Disconnected.\n");
+          }
+          cleanup();
+        });
+      });
+    },
+  );
 
 // ==================== RUN ====================
 
