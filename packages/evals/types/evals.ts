@@ -1,5 +1,8 @@
 import { z } from "zod";
-import type { AvailableModel } from "@browserbasehq/stagehand";
+import type {
+  AgentToolMode,
+  AvailableModel,
+} from "@browserbasehq/stagehand";
 import type { LogLine } from "@browserbasehq/stagehand";
 import type { AgentInstance } from "@browserbasehq/stagehand";
 import type { EvalCase } from "braintrust";
@@ -42,6 +45,7 @@ export type EvalCategory = z.infer<typeof EvalCategorySchema>;
 export interface EvalInput {
   name: string;
   modelName: AvailableModel;
+  agentMode?: AgentToolMode;
   isCUA?: boolean;
   // Optional per-test parameters, used by data-driven tasks
   params?: Record<string, unknown>;
@@ -66,6 +70,7 @@ export interface Testcase
       provider?: string;
       toolSurface?: string;
       startupProfile?: string;
+      agentMode?: AgentToolMode;
     }
   > {
   input: EvalInput;
@@ -87,6 +92,7 @@ export interface Testcase
     provider?: string;
     toolSurface?: string;
     startupProfile?: string;
+    agentMode?: AgentToolMode;
   };
   expected: unknown;
 }
@@ -116,5 +122,7 @@ export type LogLineEval = LogLine & {
 
 export type AgentModelEntry = {
   modelName: string;
+  mode: AgentToolMode;
+  /** @deprecated Use mode === "cua". */
   cua: boolean;
 };
