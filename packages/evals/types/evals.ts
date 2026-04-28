@@ -1,8 +1,5 @@
 import { z } from "zod";
-import type {
-  AgentToolMode,
-  AvailableModel,
-} from "@browserbasehq/stagehand";
+import type { AgentToolMode, AvailableModel } from "@browserbasehq/stagehand";
 import type { LogLine } from "@browserbasehq/stagehand";
 import type { AgentInstance } from "@browserbasehq/stagehand";
 import type { EvalCase } from "braintrust";
