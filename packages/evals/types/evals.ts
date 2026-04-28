@@ -58,6 +58,8 @@ export interface Testcase
     {
       model: AvailableModel;
       test: string;
+      tier?: "core" | "bench";
+      task?: string;
       categories?: string[];
       category?: string;
       dataset?: string;
@@ -70,6 +72,9 @@ export interface Testcase
       provider?: string;
       toolSurface?: string;
       startupProfile?: string;
+      toolCommand?: string;
+      browseCliVersion?: string;
+      browseCliEntrypoint?: string;
       agentMode?: AgentToolMode;
     }
   > {
@@ -79,6 +84,8 @@ export interface Testcase
   metadata: {
     model: AvailableModel;
     test: string;
+    tier?: "core" | "bench";
+    task?: string;
     categories?: string[];
     category?: string;
     dataset?: string;
@@ -92,6 +99,9 @@ export interface Testcase
     provider?: string;
     toolSurface?: string;
     startupProfile?: string;
+    toolCommand?: string;
+    browseCliVersion?: string;
+    browseCliEntrypoint?: string;
     agentMode?: AgentToolMode;
   };
   expected: unknown;
