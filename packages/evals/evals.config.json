@@ -9,17 +9,10 @@
     "verbose": false
   },
   "benchmarks": {
-    "gaia": {
-      "limit": 25,
-      "filters": ["level"]
-    },
     "webvoyager": {
       "limit": 25
     },
     "onlineMind2Web": {
-      "limit": 25
-    },
-    "webtailbench": {
       "limit": 25
     }
   }

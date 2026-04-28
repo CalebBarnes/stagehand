@@ -60,6 +60,12 @@ export interface Testcase
       task_id?: string;
       website?: string;
       difficulty?: string;
+      harness?: string;
+      environment?: "LOCAL" | "BROWSERBASE";
+      api?: boolean;
+      provider?: string;
+      toolSurface?: string;
+      startupProfile?: string;
     }
   > {
   input: EvalInput;
@@ -75,6 +81,12 @@ export interface Testcase
     website?: string;
     difficulty?: string;
     task_category?: string;
+    harness?: string;
+    environment?: "LOCAL" | "BROWSERBASE";
+    api?: boolean;
+    provider?: string;
+    toolSurface?: string;
+    startupProfile?: string;
   };
   expected: unknown;
 }
