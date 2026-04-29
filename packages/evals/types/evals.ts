@@ -110,6 +110,7 @@ export interface SummaryResult {
   output: { _success: boolean };
   name: string;
   score: number;
+  categories?: string[];
 }
 
 export interface EvalArgs<TInput, TOutput, TExpected> {
